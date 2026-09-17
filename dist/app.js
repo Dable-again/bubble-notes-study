@@ -39,7 +39,11 @@ let tipDraft = null;
 let tipDraftNewFiles = [];
 let tipRenderUrls = [];
 let tipRenderId = 0;
+let pdfTasks = [];
 let inkTool = 'black';
+let inkBrush = 'pen';
+let inkSize = 7;
+let inkSensitivity = 65;
 let dragState = null;
 let suppressDragClickUntil = 0;
 let suppressDragTarget = null;
@@ -240,7 +244,21 @@ function renderRecords() {
     </button>`).join('') : '<div class="empty">还没有记录</div>';
   $('records').querySelectorAll('[data-record]').forEach(button => {
     button.addEventListener('click', () => openRecord(button.dataset.record));
+    button.addEventListener('contextmenu', event => { event.preventDefault(); openRecordColor(button.dataset.record); });
   });
+}
+
+function openRecordColor(id) {
+  const record = currentSection()?.records.find(item => item.id === id);
+  if (!record) return;
+  renderLevels('record-color-picks', record.level || 'none', level => {
+    record.level = level;
+    record.updatedAt = Date.now();
+    save();
+    $('record-color-modal').hidden = true;
+    renderRecords();
+  });
+  $('record-color-modal').hidden = false;
 }
 
 function addRecord() {
@@ -263,7 +281,6 @@ function openRecord(id) {
   $('record-body').value = record.body;
   fitTextarea($('record-body'));
   document.querySelector('.attachment-dock').open = false;
-  renderRecordLevels();
   renderTips();
   show('record');
   renderAttachments();
@@ -277,16 +294,6 @@ function renderLevels(containerId, selected, onSelect) {
     </button>`).join('');
   container.querySelectorAll('[data-level]').forEach(button => {
     button.addEventListener('click', () => onSelect(button.dataset.level));
-  });
-}
-
-function renderRecordLevels() {
-  const record = currentRecord();
-  renderLevels('record-levels', record.level, level => {
-    record.level = level;
-    record.updatedAt = Date.now();
-    save();
-    renderRecordLevels();
   });
 }
 
@@ -623,10 +630,15 @@ function openTip(id = null) {
   const tip = id ? currentTip() : null;
   $('tip-dialog-title').textContent = tip ? '编辑 tip' : '新建 tip';
   $('tip-title').value = tip?.title || '';
-  const sourceBlocks = structuredClone(tip?.blocks || (tip?.body ? [{ id: uid(), type: 'text', text: tip.body }] : [{ id: uid(), type: 'text', text: '' }]));
-  tipDraft = { blocks: sourceBlocks.map(block => block.type === 'drawing' && block.strokes?.length ? { id: block.id, type: 'ink', strokes: block.strokes } : block) };
+  const sourceBlocks = structuredClone(tip?.blocks || (tip?.body ? [{ id: uid(), type: 'text', text: tip.body }] : [{ id: uid(), type: 'ink', strokes: [] }]));
+  tipDraft = { blocks: sourceBlocks.map(block => block.type === 'drawing' && block.strokes?.length
+    ? { id: block.id, type: 'ink', strokes: block.strokes }
+    : block.type === 'file' && /\.pdf$/i.test(block.fileName || '')
+      ? { ...block, type: 'pdf', annotations: block.annotations || {} }
+      : block) };
   tipDraftNewFiles = [];
   inkTool = 'black';
+  inkBrush = 'pen';
   tipLevel = tip?.level || 'none';
   $('tip-color-popover').hidden = true;
   $('tip-color-button').setAttribute('aria-expanded', 'false');
@@ -635,17 +647,45 @@ function openTip(id = null) {
   renderTipLevels();
   $('tip-modal').hidden = false;
   renderTipDocument();
-  $('tip-title').focus();
+}
+
+function inkToolbarHtml() {
+  return `<div class="ink-tools" role="toolbar" aria-label="手写工具">
+    <button class="ink-color black" data-ink-tool="black" aria-label="黑色笔" aria-pressed="${inkTool === 'black'}"></button>
+    <button class="ink-color red" data-ink-tool="red" aria-label="红色笔" aria-pressed="${inkTool === 'red'}"></button>
+    <button class="ink-color blue" data-ink-tool="blue" aria-label="蓝色笔" aria-pressed="${inkTool === 'blue'}"></button>
+    <button class="ink-eraser" data-ink-tool="erase" aria-label="橡皮擦" aria-pressed="${inkTool === 'erase'}">⌫</button>
+    <button class="ink-pan" data-ink-tool="pan" aria-label="移动页面" title="移动页面" aria-pressed="${inkTool === 'pan'}">✋</button>
+    <details class="brush-settings"><summary aria-label="笔刷设置" title="笔刷设置">✎</summary><div class="brush-panel">
+      <label>笔刷<select data-brush><option value="pen" ${inkBrush === 'pen' ? 'selected' : ''}>圆笔</option><option value="pencil" ${inkBrush === 'pencil' ? 'selected' : ''}>铅笔</option><option value="marker" ${inkBrush === 'marker' ? 'selected' : ''}>荧光笔</option></select></label>
+      <label>粗细 <output data-size-value>${inkSize}</output><input data-ink-size type="range" min="1" max="24" value="${inkSize}"></label>
+      <label>压感 <output data-pressure-value>${inkSensitivity}%</output><input data-ink-pressure type="range" min="0" max="100" value="${inkSensitivity}"></label>
+    </div></details><button class="ink-undo" aria-label="撤销上一笔">↶</button>
+  </div>`;
+}
+
+function bindInkToolbar(element, block, canvas) {
+  element.querySelectorAll('[data-ink-tool]').forEach(button => button.onclick = () => {
+    inkTool = button.dataset.inkTool;
+    document.querySelectorAll('[data-ink-tool]').forEach(option => option.setAttribute('aria-pressed', String(option.dataset.inkTool === inkTool)));
+    document.querySelectorAll('.tip-ink').forEach(ink => ink.classList.toggle('is-pan', inkTool === 'pan'));
+  });
+  element.querySelector('[data-brush]').onchange = event => { inkBrush = event.target.value; };
+  element.querySelector('[data-ink-size]').oninput = event => { inkSize = Number(event.target.value); element.querySelector('[data-size-value]').textContent = inkSize; };
+  element.querySelector('[data-ink-pressure]').oninput = event => { inkSensitivity = Number(event.target.value); element.querySelector('[data-pressure-value]').textContent = `${inkSensitivity}%`; };
+  element.querySelector('.ink-undo').onclick = () => { block.strokes.pop(); redrawTipInk(block, canvas); };
 }
 
 async function renderTipDocument() {
   if (!tipDraft) return;
   const renderId = ++tipRenderId;
+  pdfTasks.forEach(task => task.destroy().catch(() => {}));
+  pdfTasks = [];
   clearTipUrls();
   const container = $('tip-document');
   container.innerHTML = tipDraft.blocks.map((block, index) => `<div class="tip-block" data-block="${block.id}">
     <div class="tip-block-tools"><span>${index + 1}</span><button data-move="up" aria-label="上移内容" ${index === 0 ? 'disabled' : ''}>↑</button><button data-move="down" aria-label="下移内容" ${index === tipDraft.blocks.length - 1 ? 'disabled' : ''}>↓</button><button data-remove-block aria-label="删除这块内容">×</button></div>
-    ${block.type === 'text' ? `<textarea class="tip-text" rows="2" aria-label="第 ${index + 1} 段文字" placeholder="写在这里…">${escapeHtml(block.text || '')}</textarea>` : block.type === 'ink' ? `<div class="ink-sheet"><div class="ink-tools" role="toolbar" aria-label="手写工具"><button class="ink-color black" data-ink-tool="black" aria-label="黑色笔" aria-pressed="${inkTool === 'black'}"></button><button class="ink-color red" data-ink-tool="red" aria-label="红色笔" aria-pressed="${inkTool === 'red'}"></button><button class="ink-color blue" data-ink-tool="blue" aria-label="蓝色笔" aria-pressed="${inkTool === 'blue'}"></button><button class="ink-eraser" data-ink-tool="erase" aria-label="橡皮擦" aria-pressed="${inkTool === 'erase'}">⌫</button><button class="ink-undo" aria-label="撤销上一笔">↶</button></div><canvas class="tip-ink" width="1000" height="625" aria-label="直接在小 tip 中手写"></canvas></div>` : block.type === 'file' ? `<a class="tip-file-block" aria-label="打开文件：${escapeHtml(block.fileName || '文件')}" target="_blank" rel="noopener">▤ <span>${escapeHtml(block.fileName || '文件')}</span></a>` : `<button class="tip-image-block" aria-label="查看图片"><span>加载中…</span></button>`}
+    ${block.type === 'text' ? `<textarea class="tip-text" rows="2" aria-label="第 ${index + 1} 段文字" placeholder="写在这里…">${escapeHtml(block.text || '')}</textarea>` : block.type === 'ink' ? `<div class="ink-sheet">${inkToolbarHtml()}<canvas class="tip-ink" width="1000" height="625" aria-label="直接在小 tip 中手写"></canvas></div>` : block.type === 'pdf' ? `<div class="pdf-sheet">${inkToolbarHtml()}<div class="pdf-stage"><canvas class="pdf-page" aria-label="PDF 页面"></canvas><canvas class="tip-ink pdf-ink" data-overlay="true" aria-label="在 PDF 上手写"></canvas></div><div class="pdf-pagebar"><button data-pdf-prev aria-label="上一页">←</button><span data-pdf-status>加载 PDF…</span><button data-pdf-next aria-label="下一页">→</button><button data-pdf-export aria-label="导出批注 PDF" title="导出批注 PDF">↓ PDF</button></div></div>` : block.type === 'file' ? `<a class="tip-file-block" aria-label="打开文件：${escapeHtml(block.fileName || '文件')}" target="_blank" rel="noopener">▤ <span>${escapeHtml(block.fileName || '文件')}</span></a>` : `<button class="tip-image-block" aria-label="查看图片"><span>加载中…</span></button>`}
   </div>`).join('');
   container.querySelectorAll('[data-block]').forEach(element => {
     const block = tipDraft.blocks.find(item => item.id === element.dataset.block);
@@ -662,12 +702,8 @@ async function renderTipDocument() {
     if (imageButton) imageButton.onclick = () => openTipImage(block.fileId);
     const inkCanvas = element.querySelector('.tip-ink');
     if (inkCanvas) {
-      setupTipInk(block, inkCanvas);
-      element.querySelectorAll('[data-ink-tool]').forEach(button => button.onclick = () => {
-        inkTool = button.dataset.inkTool;
-        document.querySelectorAll('[data-ink-tool]').forEach(option => option.setAttribute('aria-pressed', String(option.dataset.inkTool === inkTool)));
-      });
-      element.querySelector('.ink-undo').onclick = () => { block.strokes.pop(); redrawTipInk(block, inkCanvas); };
+      if (block.type === 'ink') { setupTipInk(block, inkCanvas); bindInkToolbar(element, block, inkCanvas); }
+      else renderPdfBlock(block, element, renderId);
     }
   });
   for (const block of tipDraft.blocks.filter(item => ['image', 'drawing', 'file'].includes(item.type))) {
@@ -686,6 +722,55 @@ async function renderTipDocument() {
   }
 }
 
+async function renderPdfBlock(block, element, renderId) {
+  const status = element.querySelector('[data-pdf-status]');
+  if (!window.pdfjsLib) { status.textContent = 'PDF 阅读器不可用'; return; }
+  try {
+    const blob = await getFile(block.fileId);
+    if (!blob) throw new Error('PDF 文件缺失');
+    if (renderId !== tipRenderId || !element.isConnected) return;
+    window.pdfjsLib.GlobalWorkerOptions.workerSrc = './vendor/pdfjs.worker.min.js';
+    const task = window.pdfjsLib.getDocument({ data: new Uint8Array(await blob.arrayBuffer()), useSystemFonts: true });
+    pdfTasks.push(task);
+    const documentPdf = await task.promise;
+    if (renderId !== tipRenderId || !element.isConnected) return;
+    const pageCanvas = element.querySelector('.pdf-page');
+    const inkCanvas = element.querySelector('.pdf-ink');
+    const prev = element.querySelector('[data-pdf-prev]');
+    const next = element.querySelector('[data-pdf-next]');
+    let pageNumber = Math.max(1, Math.min(documentPdf.numPages, Number(block.viewPage) || 1));
+    let busy = false;
+    const showPage = async () => {
+      if (busy) return;
+      busy = true;
+      prev.disabled = next.disabled = true;
+      try {
+        const page = await documentPdf.getPage(pageNumber);
+        const unit = page.getViewport({ scale: 1 });
+        const viewport = page.getViewport({ scale: Math.min(1000 / unit.width, 1700 / unit.height) });
+        pageCanvas.width = inkCanvas.width = Math.ceil(viewport.width);
+        pageCanvas.height = inkCanvas.height = Math.ceil(viewport.height);
+        await page.render({ canvasContext: pageCanvas.getContext('2d'), viewport }).promise;
+        if (renderId !== tipRenderId || !element.isConnected) return;
+        block.viewPage = pageNumber;
+        block.annotations ||= {};
+        const pageInk = block.annotations[pageNumber] ||= { strokes: [] };
+        setupTipInk(pageInk, inkCanvas);
+        bindInkToolbar(element, pageInk, inkCanvas);
+        status.textContent = `${pageNumber} / ${documentPdf.numPages}`;
+      } catch { status.textContent = 'PDF 页面无法显示'; }
+      finally { busy = false; prev.disabled = pageNumber === 1; next.disabled = pageNumber === documentPdf.numPages; }
+    };
+    prev.onclick = () => { if (busy || pageNumber <= 1) return; pageNumber--; showPage(); };
+    next.onclick = () => { if (busy || pageNumber >= documentPdf.numPages) return; pageNumber++; showPage(); };
+    element.querySelector('[data-pdf-export]').onclick = async () => {
+      try { await window.BubblePdfAnnotation.exportAnnotated(block, getFile); message('批注 PDF 已导出'); }
+      catch (error) { message(error.message || 'PDF 导出失败'); }
+    };
+    await showPage();
+  } catch { if (renderId === tipRenderId) status.textContent = 'PDF 无法打开'; }
+}
+
 async function openTipImage(id) {
   const blob = await getFile(id);
   if (!blob) return message('图片缺失');
@@ -700,28 +785,38 @@ async function openTipImage(id) {
 }
 
 const inkColors = { black: '#263351', red: '#dc5766', blue: '#4275cf' };
+const pencilColors = { black: '#687185', red: '#e4929c', blue: '#8da9e0' };
 
-function drawTipInkSegment(context, canvas, color, first, second, dot = false) {
-  context.strokeStyle = inkColors[color] || inkColors.black;
+function inkWidth(stroke, pressure, canvasWidth = 1000) {
+  const size = Math.max(1, Math.min(24, Number(stroke.size) || 8));
+  const sensitivity = Math.max(0, Math.min(100, Number(stroke.sensitivity ?? 65))) / 100;
+  const factor = Math.max(.2, 1 + ((pressure || .5) - .5) * 2 * sensitivity);
+  return size * factor * (stroke.brush === 'marker' ? 1.8 : stroke.brush === 'pencil' ? .72 : 1) * canvasWidth / 1000;
+}
+
+function drawTipInkSegment(context, canvas, stroke, first, second, dot = false) {
+  context.strokeStyle = stroke.brush === 'pencil' ? (pencilColors[stroke.color] || pencilColors.black) : (inkColors[stroke.color] || inkColors.black);
+  context.globalAlpha = stroke.brush === 'marker' ? .34 : 1;
   context.lineCap = 'round';
   context.lineJoin = 'round';
-  context.lineWidth = 2 + 13 * ((first.p + second.p) / 2);
+  context.lineWidth = inkWidth(stroke, (first.p + second.p) / 2, canvas.width);
   context.beginPath();
   context.moveTo(first.x * canvas.width, first.y * canvas.height);
   context.lineTo((second.x + (dot ? .0001 : 0)) * canvas.width, second.y * canvas.height);
   context.stroke();
+  context.globalAlpha = 1;
 }
 
 function redrawTipInk(block, canvas) {
   const context = canvas.getContext('2d');
-  context.fillStyle = '#fff';
-  context.fillRect(0, 0, canvas.width, canvas.height);
+  context.clearRect(0, 0, canvas.width, canvas.height);
+  if (!canvas.dataset.overlay) { context.fillStyle = '#fff'; context.fillRect(0, 0, canvas.width, canvas.height); }
   for (const stroke of block.strokes || []) {
     const points = stroke.points || [];
     for (let index = 0; index < points.length; index++) {
       const first = points[Math.max(0, index - 1)];
       const second = points[index];
-      drawTipInkSegment(context, canvas, stroke.color, first, second, index === 0);
+      drawTipInkSegment(context, canvas, stroke, first, second, index === 0);
     }
   }
 }
@@ -729,6 +824,7 @@ function redrawTipInk(block, canvas) {
 function setupTipInk(block, canvas) {
   block.strokes ||= [];
   redrawTipInk(block, canvas);
+  canvas.classList.toggle('is-pan', inkTool === 'pan');
   let pointerId = null;
   let active = null;
   const point = event => {
@@ -741,18 +837,19 @@ function setupTipInk(block, canvas) {
   };
   const erase = target => {
     const before = block.strokes.length;
-    block.strokes = block.strokes.filter(stroke => !(stroke.points || []).some(item => Math.hypot((item.x - target.x) * 1.6, item.y - target.y) < .045));
+    block.strokes = block.strokes.filter(stroke => !(stroke.points || []).some(item => Math.hypot((item.x - target.x) * 1.6, item.y - target.y) < Math.max(.018, inkSize / 450)));
     if (before !== block.strokes.length) redrawTipInk(block, canvas);
   };
   canvas.onpointerdown = event => {
+    if (inkTool === 'pan') return;
     event.preventDefault();
     pointerId = event.pointerId;
     canvas.setPointerCapture(pointerId);
     const first = point(event);
     if (inkTool === 'erase') erase(first);
     else {
-      active = { color: inkTool, points: [first] };
-      drawTipInkSegment(canvas.getContext('2d'), canvas, active.color, first, first, true);
+      active = { color: inkTool, brush: inkBrush, size: inkSize, sensitivity: inkSensitivity, points: [first] };
+      drawTipInkSegment(canvas.getContext('2d'), canvas, active, first, first, true);
     }
   };
   canvas.onpointermove = event => {
@@ -766,7 +863,7 @@ function setupTipInk(block, canvas) {
         const previous = active.points.at(-1);
         if (next.x !== previous.x || next.y !== previous.y) {
           active.points.push(next);
-          drawTipInkSegment(canvas.getContext('2d'), canvas, active.color, previous, next);
+          drawTipInkSegment(canvas.getContext('2d'), canvas, active, previous, next);
         }
       }
     }
@@ -813,7 +910,9 @@ async function addTipFiles(event) {
       await putFile(id, file);
       if (draft !== tipDraft) { await removeFile(id); continue; }
       tipDraftNewFiles.push(id);
-      draft.blocks.push({ id: uid(), type: 'file', fileId: id, fileName: file.name.slice(0, 255) });
+      const isPdf = file.type === 'application/pdf' || /\.pdf$/i.test(file.name);
+      if (isPdf && draft.blocks.length === 1 && draft.blocks[0].type === 'ink' && !draft.blocks[0].strokes?.length) draft.blocks = [];
+      draft.blocks.push({ id: uid(), type: isPdf ? 'pdf' : 'file', fileId: id, fileName: file.name.slice(0, 255), ...(isPdf ? { annotations: {} } : {}) });
     } catch { message('文件保存失败'); }
   }
   if (draft === tipDraft) renderTipDocument();
@@ -823,6 +922,14 @@ async function exportTipPdf() {
   if (!tipDraft) return;
   const title = $('tip-title').value.trim() || '小 tip';
   try {
+    const pdfBlocks = tipDraft.blocks.filter(block => block.type === 'pdf');
+    if (pdfBlocks.length) {
+      if (pdfBlocks.length !== 1 || tipDraft.blocks.some(block => block.type !== 'pdf' && (block.type !== 'ink' || block.strokes?.length))) {
+        return message('请在 PDF 页面下方单独导出批注 PDF');
+      }
+      await window.BubblePdfAnnotation.exportAnnotated(pdfBlocks[0], getFile);
+      return message('批注 PDF 已导出');
+    }
     await window.BubblePdf.exportPdf(title, [{ title: '', blocks: tipDraft.blocks.map(block => block.type === 'file' ? { type: 'text', text: `文件：${block.fileName || '文件'}` } : block) }], getFile);
     message('PDF 已导出');
   } catch (error) { message(error.message || 'PDF 导出失败'); }
@@ -859,6 +966,8 @@ function closeTip() {
   $('tip-modal').hidden = true;
   $('tip-color-popover').hidden = true;
   ++tipRenderId;
+  pdfTasks.forEach(task => task.destroy().catch(() => {}));
+  pdfTasks = [];
   clearTipUrls();
   Promise.allSettled(tipDraftNewFiles.map(removeFile));
   tipDraftNewFiles = [];
@@ -995,7 +1104,7 @@ async function exportBackup() {
       if (!blob) throw new Error('附件数据缺失，无法完整备份');
       files.push({ id, type: blob.type, data: bytesToBase64(new Uint8Array(await blob.arrayBuffer())) });
     }
-    const data = JSON.stringify({ format: 'bubble-notes-backup', version: 4, exportedAt: new Date().toISOString(), sections: state.sections, files });
+    const data = JSON.stringify({ format: 'bubble-notes-backup', version: 5, exportedAt: new Date().toISOString(), sections: state.sections, files });
     const blob = new Blob([data], { type: 'application/json' });
     const name = `泡泡笔记备份-${new Date().toISOString().slice(0, 10)}.json`;
     if (window.BubbleNative) await saveBlobNative(blob, name);
@@ -1019,7 +1128,7 @@ async function exportBackup() {
 }
 
 function normalizeBackup(data) {
-  if (!data || data.format !== 'bubble-notes-backup' || ![1, 2, 3, 4].includes(data.version) || !Array.isArray(data.sections) || data.sections.length > 10000) {
+  if (!data || data.format !== 'bubble-notes-backup' || ![1, 2, 3, 4, 5].includes(data.version) || !Array.isArray(data.sections) || data.sections.length > 10000) {
     throw new Error('备份格式不正确');
   }
   if (data.version >= 2 && !Array.isArray(data.files)) throw new Error('附件数据不完整');
@@ -1029,6 +1138,17 @@ function normalizeBackup(data) {
   let tipCount = 0;
   let attachmentCount = 0;
   const validLevel = value => levels.some(level => level.id === value) ? value : 'none';
+  const normalizeStrokes = raw => (Array.isArray(raw) ? raw : []).slice(0, 10000).map(stroke => ({
+    color: ['black', 'red', 'blue'].includes(stroke?.color) ? stroke.color : 'black',
+    brush: ['pen', 'pencil', 'marker'].includes(stroke?.brush) ? stroke.brush : 'pen',
+    size: Math.max(1, Math.min(24, Number(stroke?.size) || 8)),
+    sensitivity: Math.max(0, Math.min(100, Number(stroke?.sensitivity ?? 65))),
+    points: (Array.isArray(stroke?.points) ? stroke.points : []).slice(0, 10000).map(point => ({
+      x: Math.max(0, Math.min(1, Number(point?.x) || 0)),
+      y: Math.max(0, Math.min(1, Number(point?.y) || 0)),
+      p: Math.max(.1, Math.min(1, Number(point?.p) || .5))
+    }))
+  }));
   const sections = data.sections.map(section => {
     if (!section || typeof section.name !== 'string' || !Array.isArray(section.records) || section.records.length > 10000) throw new Error('分区数据不完整');
     const records = section.records.map(record => {
@@ -1041,24 +1161,22 @@ function normalizeBackup(data) {
         const blocks = (tip.blocks || []).map(block => {
           if (block?.type === 'text' && typeof block.text === 'string') return { id: uid(), type: 'text', text: block.text };
           if (block?.type === 'ink' && Array.isArray(block.strokes)) {
-            const strokes = block.strokes.slice(0, 10000).map(stroke => ({
-              color: ['black', 'red', 'blue'].includes(stroke?.color) ? stroke.color : 'black',
-              points: (Array.isArray(stroke?.points) ? stroke.points : []).slice(0, 10000).map(point => ({
-                x: Math.max(0, Math.min(1, Number(point?.x) || 0)),
-                y: Math.max(0, Math.min(1, Number(point?.y) || 0)),
-                p: Math.max(.1, Math.min(1, Number(point?.p) || .5))
-              }))
-            }));
-            return { id: uid(), type: 'ink', strokes };
+            return { id: uid(), type: 'ink', strokes: normalizeStrokes(block.strokes) };
           }
-          if (!['image', 'drawing', 'file'].includes(block?.type) || typeof block.fileId !== 'string') throw new Error('tip 内容不完整');
+          if (!['image', 'drawing', 'file', 'pdf'].includes(block?.type) || typeof block.fileId !== 'string') throw new Error('tip 内容不完整');
           const file = filesById.get(block.fileId);
           if (!file || typeof file.data !== 'string' || typeof file.type !== 'string') throw new Error('tip 图片数据不完整');
           const blob = base64ToBlob(file.data, file.type);
           const id = uid();
           attachmentCount++;
           importedFiles.push({ id, blob });
-          return { id: uid(), type: block.type, fileId: id, fileName: block.type === 'file' ? String(block.fileName || '文件').slice(0, 255) : undefined, strokes: Array.isArray(block.strokes) ? block.strokes : undefined };
+          const annotations = {};
+          if (block.type === 'pdf' && block.annotations && typeof block.annotations === 'object') {
+            for (const page of Object.keys(block.annotations).slice(0, 10000)) {
+              if (/^[1-9]\d*$/.test(page)) annotations[page] = { strokes: normalizeStrokes(block.annotations[page]?.strokes) };
+            }
+          }
+          return { id: uid(), type: block.type, fileId: id, fileName: ['file', 'pdf'].includes(block.type) ? String(block.fileName || '文件').slice(0, 255) : undefined, strokes: Array.isArray(block.strokes) ? block.strokes : undefined, ...(block.type === 'pdf' ? { annotations } : {}) };
         });
         return { id: uid(), title: tip.title.slice(0, 80), body: tip.body, blocks, level: validLevel(tip.level), createdAt: Number(tip.createdAt) || Date.now() };
       });
@@ -1128,7 +1246,7 @@ function bindEvents() {
   window.BubbleBack = () => {
     if (!$('tip-modal').hidden) { closeTip(); return true; }
     if (!$('drawing-modal').hidden) { cancelDrawing(); return true; }
-    for (const id of ['section-modal', 'backup-modal']) {
+    for (const id of ['record-color-modal', 'section-modal', 'backup-modal']) {
       if (!$(id).hidden) { $(id).hidden = true; return true; }
     }
     if ($('record').classList.contains('active')) { renderRecords(); show('zone'); return true; }
@@ -1156,13 +1274,31 @@ function bindEvents() {
     const tile = event.target.closest(tileSelector);
     if (!tile) return;
     dragState = { ...tileKind(tile), tile, pointerId: event.pointerId, pointerType: event.pointerType, x: event.clientX, y: event.clientY, active: false };
-    dragState.timer = setTimeout(beginTileDrag, 430);
+    dragState.timer = setTimeout(() => {
+      if (dragState?.kind !== 'record') return beginTileDrag();
+      dragState.ready = true;
+      dragState.timer = setTimeout(() => {
+        const held = dragState;
+        if (!held || held.active) return;
+        suppressDragClickUntil = Date.now() + 500;
+        suppressDragTarget = held.tile;
+        clearTileDrag();
+        openRecordColor(held.id);
+        if (held.pointerType === 'touch') navigator.vibrate?.(30);
+      }, 180);
+    }, 430);
   }, true);
   document.addEventListener('pointermove', event => {
     const drag = dragState;
     if (!drag || drag.pointerId !== event.pointerId) return;
     if (!drag.active) {
-      if (Math.hypot(event.clientX - drag.x, event.clientY - drag.y) > 10) clearTileDrag();
+      if (Math.hypot(event.clientX - drag.x, event.clientY - drag.y) > 10) {
+        if (drag.kind === 'record' && drag.ready) {
+          clearTimeout(drag.timer);
+          beginTileDrag();
+          moveTileDrag(event.clientX, event.clientY);
+        } else clearTileDrag();
+      }
       return;
     }
     event.preventDefault();
@@ -1226,6 +1362,7 @@ function bindEvents() {
   $('section-name').onkeydown = event => { if (event.key === 'Enter') saveSection(); };
   $('back-home').onclick = () => { renderSections(); show('home'); };
   $('add-record').onclick = addRecord;
+  $('close-record-color').onclick = () => { $('record-color-modal').hidden = true; };
   $('back-zone').onclick = () => { renderRecords(); show('zone'); };
   $('record-title').oninput = event => {
     const record = currentRecord();

@@ -68,18 +68,25 @@
       context.fillStyle = '#fff';
       context.fillRect(M, y, width, height);
       const colors = { black: '#263351', red: '#dc5766', blue: '#4275cf' };
+      const pencilColors = { black: '#687185', red: '#e4929c', blue: '#8da9e0' };
       for (const stroke of strokes || []) {
-        context.strokeStyle = colors[stroke.color] || colors.black;
+        context.strokeStyle = stroke.brush === 'pencil' ? (pencilColors[stroke.color] || pencilColors.black) : (colors[stroke.color] || colors.black);
+        context.globalAlpha = stroke.brush === 'marker' ? .34 : 1;
         context.lineCap = 'round'; context.lineJoin = 'round';
         const points = stroke.points || [];
         for (let index = 0; index < points.length; index++) {
           const first = points[Math.max(0, index - 1)], second = points[index];
-          context.lineWidth = (2 + 13 * ((first.p + second.p) / 2)) * width / 1000;
+          const pressure = (first.p + second.p) / 2;
+          const size = Math.max(1, Math.min(24, Number(stroke.size) || 8));
+          const sensitivity = Math.max(0, Math.min(100, Number(stroke.sensitivity ?? 65))) / 100;
+          context.lineWidth = size * Math.max(.2, 1 + (pressure - .5) * 2 * sensitivity)
+            * (stroke.brush === 'marker' ? 1.8 : stroke.brush === 'pencil' ? .72 : 1) * width / 1000;
           context.beginPath();
           context.moveTo(M + first.x * width, y + first.y * height);
           context.lineTo(M + (second.x + (index ? 0 : .0001)) * width, y + second.y * height);
           context.stroke();
         }
+        context.globalAlpha = 1;
       }
       y += height + 28;
     };

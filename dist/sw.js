@@ -1,5 +1,5 @@
-const CACHE_NAME = 'bubble-notes-shell-v9';
-const APP_FILES = ['./', './index.html', './style.css', './app.js', './pdf.js', './manifest.webmanifest', './icon-192.png', './icon-512.png'];
+const CACHE_NAME = 'bubble-notes-shell-v12';
+const APP_FILES = ['./', './index.html', './style.css', './app.js', './pdf.js', './pdf-annotation.js', './vendor/pdfjs.min.js', './vendor/pdfjs.worker.min.js', './vendor/pdf-lib.min.js', './manifest.webmanifest', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(CACHE_NAME).then(cache => cache.addAll(APP_FILES)).then(() => self.skipWaiting()));

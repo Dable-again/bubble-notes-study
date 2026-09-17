@@ -60,4 +60,12 @@ withFile.sections[0].records[0].tips[0].blocks = [{ type: 'file', fileId: 'book'
 const restoredFile = context.normalizeBackup(withFile);
 assert.equal(restoredFile.sections[0].records[0].tips[0].blocks[0].fileName, '习题.pdf');
 assert.equal(restoredFile.files[0].blob.type, 'application/pdf');
-console.log('v1–v4 backups accepted; tip images, handwriting, and files preserved.');
+const v5 = base(5);
+v5.files = [{ id: 'pdf', type: 'application/pdf', data: 'JVBERg==' }];
+v5.sections[0].records[0].tips[0].blocks = [{ type: 'pdf', fileId: 'pdf', fileName: '练习.pdf', annotations: { 2: { strokes: [{ color: 'blue', brush: 'pencil', size: 14, sensitivity: 80, points: [{ x: .2, y: .3, p: .7 }] }] } } }];
+const restoredPdf = context.normalizeBackup(v5).sections[0].records[0].tips[0].blocks[0];
+assert.equal(restoredPdf.type, 'pdf');
+assert.equal(restoredPdf.annotations[2].strokes[0].brush, 'pencil');
+assert.equal(restoredPdf.annotations[2].strokes[0].size, 14);
+assert.equal(restoredPdf.annotations[2].strokes[0].sensitivity, 80);
+console.log('v1–v5 backups accepted; PDF annotations and pen settings preserved.');

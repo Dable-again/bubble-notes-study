@@ -8,6 +8,7 @@ async page => {
     await page.mouse.move(from.x + from.width / 2, from.y + from.height / 2);
     await page.mouse.down();
     await page.waitForTimeout(500);
+    if (await source.getAttribute('data-record')) await page.mouse.move(from.x + from.width / 2 + 16, from.y + from.height / 2, { steps: 3 });
     const to = await destination();
     await page.mouse.move(to.x, to.y, { steps: 8 });
     await page.mouse.up();
