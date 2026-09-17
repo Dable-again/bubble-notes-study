@@ -11,9 +11,9 @@
     blue: [0.55, 0.66, 0.88]
   };
 
-  async function exportAnnotated(block, getFile) {
+  async function buildAnnotated(block, getFile) {
     if (!window.PDFLib || !window.pdfjsLib) throw new Error('PDF 工具不可用');
-    const source = await getFile(block.fileId);
+    const source = block.type === 'question' ? await window.BubbleQuestionBank.cropPdf(block, getFile) : await getFile(block.fileId);
     if (!source) throw new Error('PDF 文件缺失');
     const bytes = await source.arrayBuffer();
     const output = await PDFLib.PDFDocument.load(bytes.slice(0));
@@ -52,7 +52,12 @@
           }
         }
       }
-      const result = new Blob([await output.save()], { type: 'application/pdf' });
+      return new Blob([await output.save()], { type: 'application/pdf' });
+    } finally { await task.destroy(); }
+  }
+
+  async function exportAnnotated(block, getFile) {
+      const result = await buildAnnotated(block, getFile);
       const filename = `${String(block.fileName || '习题').replace(/\.pdf$/i, '').replace(/[\\/:*?"<>|]/g, '_').slice(0, 55)}-批注.pdf`;
       if (window.BubbleNative && window.BubbleSaveBlob) await window.BubbleSaveBlob(result, filename);
       else {
@@ -63,8 +68,7 @@
         setTimeout(() => URL.revokeObjectURL(url), 60000);
       }
       return result;
-    } finally { await task.destroy(); }
   }
 
-  window.BubblePdfAnnotation = { exportAnnotated };
+  window.BubblePdfAnnotation = { exportAnnotated, buildAnnotated };
 })();

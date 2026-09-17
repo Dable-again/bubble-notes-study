@@ -1,2 +1,4 @@
 .sites-runtime/
 .playwright-cli/
+question-import-tools/
+verify-question-*.playwright.js

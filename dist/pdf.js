@@ -62,6 +62,23 @@
       bitmap.close?.();
       y += height + 28;
     };
+    const questionPage = async block => {
+      const blob = await window.BubblePdfAnnotation.buildAnnotated(block, getFile);
+      pdfjsLib.GlobalWorkerOptions.workerSrc = './vendor/pdfjs.worker.min.js';
+      const task = pdfjsLib.getDocument({ data: new Uint8Array(await blob.arrayBuffer()), useSystemFonts: true });
+      try {
+        const pdf = await task.promise;
+        const page = await pdf.getPage(1);
+        const unit = page.getViewport({ scale: 1 });
+        const viewport = page.getViewport({ scale: Math.min((RIGHT - M) / unit.width, 1300 / unit.height) });
+        const rendered = document.createElement('canvas');
+        rendered.width = Math.ceil(viewport.width); rendered.height = Math.ceil(viewport.height);
+        await page.render({ canvasContext: rendered.getContext('2d'), viewport }).promise;
+        await space(rendered.height + 28);
+        context.drawImage(rendered, M, y);
+        y += rendered.height + 28;
+      } finally { await task.destroy(); }
+    };
     const handwriting = async strokes => {
       const width = RIGHT - M, height = Math.round(width * .625);
       await space(height + 28);
@@ -101,6 +118,7 @@
       for (const block of section.blocks || []) {
         if (block.type === 'text') await paragraph(block.text, 29);
         else if (block.type === 'ink') await handwriting(block.strokes);
+        else if (block.type === 'question') await questionPage(block);
         else if (block.fileId) await picture(block.fileId);
       }
       y += 25;

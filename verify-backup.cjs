@@ -68,4 +68,16 @@ assert.equal(restoredPdf.type, 'pdf');
 assert.equal(restoredPdf.annotations[2].strokes[0].brush, 'pencil');
 assert.equal(restoredPdf.annotations[2].strokes[0].size, 14);
 assert.equal(restoredPdf.annotations[2].strokes[0].sensitivity, 80);
-console.log('v1–v5 backups accepted; PDF annotations and pen settings preserved.');
+const v6 = base(6);
+v6.files = [{ id: 'source', type: 'application/pdf', data: 'JVBERg==' }];
+v6.sections[0].records[0].tips = [1, 2].map(number => ({
+  title: `第 ${number} 题`, body: '', level: 'none', sourceHash: 'sample',
+  blocks: [{ type: 'question', fileId: 'source', fileName: '习题.pdf', page: 1,
+    crop: { x0: .06, x1: .95, y0: number / 10, y1: (number + 1) / 10 }, annotations: {} }]
+}));
+const restoredQuestions = context.normalizeBackup(v6);
+assert.equal(restoredQuestions.files.length, 1);
+assert.equal(restoredQuestions.sections[0].records[0].tips.length, 2);
+assert.equal(restoredQuestions.sections[0].records[0].tips[0].blocks[0].fileId,
+  restoredQuestions.sections[0].records[0].tips[1].blocks[0].fileId);
+console.log('v1–v6 backups accepted; shared question source, crops and PDF annotations preserved.');

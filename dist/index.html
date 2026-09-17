@@ -11,8 +11,10 @@
   <link rel="stylesheet" href="./style.css">
   <script src="./vendor/pdfjs.min.js" defer></script>
   <script src="./vendor/pdf-lib.min.js" defer></script>
+  <script src="./vendor/ocr/tesseract.min.js" defer></script>
   <script src="./pdf.js" defer></script>
   <script src="./pdf-annotation.js" defer></script>
+  <script src="./question-bank.js" defer></script>
   <script src="./app.js" defer></script>
 </head>
 <body>
@@ -32,7 +34,7 @@
       <div class="record-sheet">
         <input id="record-title" class="record-title" type="text" maxlength="80" placeholder="记录标题" aria-label="记录标题">
         <textarea id="record-body" class="record-body" rows="2" placeholder="直接开始记录…" aria-label="记录内容"></textarea>
-        <div class="tip-head"><h2>小 tip <span id="tip-count"></span></h2><div class="tip-actions"><button id="export-record-pdf" class="secondary small-icon" aria-label="导出记录 PDF" title="导出记录 PDF">PDF</button><button id="add-tip" class="secondary small-icon" aria-label="新建 tip" title="新建 tip">＋</button></div></div>
+        <div class="tip-head"><h2>小 tip <span id="tip-count"></span></h2><div class="tip-actions"><button id="export-record-pdf" class="secondary small-icon" aria-label="导出记录 PDF" title="导出记录 PDF">PDF</button><button id="import-questions" class="secondary small-icon" aria-label="导入题库" title="导入题库">⇪</button><input id="question-file" type="file" accept=".pdf,application/pdf" hidden><button id="add-tip" class="secondary small-icon" aria-label="新建 tip" title="新建 tip">＋</button></div></div>
         <div id="tips" class="tips"></div>
         <details class="attachment-dock" aria-label="记录附件">
           <summary class="attachment-head"><span>附件 <span id="attachment-count"></span></span><span class="attachment-chevron" aria-hidden="true">⌄</span></summary>
@@ -55,6 +57,9 @@
   </div>
   <div id="record-color-modal" class="modal" role="dialog" aria-modal="true" aria-label="记录颜色" hidden>
     <div class="dialog color-dialog"><div id="record-color-picks" class="level-picks"></div><button id="close-record-color" class="secondary" aria-label="关闭">×</button></div>
+  </div>
+  <div id="question-modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="question-dialog-title" hidden>
+    <div class="dialog question-dialog"><div class="question-top"><h2 id="question-dialog-title">导入题库</h2><button id="close-questions" class="tip-top-button" aria-label="关闭">×</button></div><p id="question-status" role="status">准备中…</p><div id="question-range" class="question-range" hidden><label>页码 <input id="question-from" type="number" min="1" value="1" aria-label="起始页"></label><span>—</span><label><input id="question-to" type="number" min="1" value="1" aria-label="结束页"></label><button id="analyze-questions" class="secondary">识别</button></div><div id="question-review" hidden><div class="question-review-bar"><span id="question-count"></span><button id="question-add-line" class="secondary" aria-label="补加分割线">＋ 分割线</button></div><div class="question-page-tools"><button id="question-prev-page" class="secondary" aria-label="上一页">←</button><span id="question-page-label"></span><button id="question-next-page" class="secondary" aria-label="下一页">→</button></div><div id="question-preview" class="question-preview"><canvas id="question-page-canvas" aria-label="题目分割预览"></canvas><div id="question-lines" class="question-lines"></div></div><p class="question-hint">拖动右侧题号调整；点“＋ 分割线”后点页面补切。</p><div id="question-list" class="question-list"></div></div><div class="dialog-actions"><button id="cancel-questions" class="secondary">取消</button><span class="spacer"></span><button id="confirm-questions" class="primary" hidden>生成 tip</button></div></div>
   </div>
   <div id="backup-modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="backup-dialog-title" hidden>
     <div class="dialog"><h2 id="backup-dialog-title">数据备份</h2><p class="backup-note">备份保存在你选择的位置。导入会添加到现有数据。</p><button id="export-backup" class="backup-option">↓ 导出备份</button><button id="choose-backup" class="backup-option">↑ 导入备份</button><input id="backup-file" type="file" accept=".json,application/json" hidden><p id="import-summary" class="import-summary" hidden></p><div class="dialog-actions"><button id="cancel-backup" class="secondary">关闭</button><button id="confirm-import" class="primary" hidden>确认导入</button></div></div>

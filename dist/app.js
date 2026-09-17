@@ -48,6 +48,9 @@ let dragState = null;
 let suppressDragClickUntil = 0;
 let suppressDragTarget = null;
 let pendingDeletion = null;
+let questionImport = null;
+let questionImportRun = 0;
+let questionUndo = null;
 
 const tileSelector = '.section[data-section], .record-card[data-record], .tip-tile[data-tip], .attachment-card[data-attachment]';
 
@@ -120,6 +123,9 @@ function fileTransaction(mode, action) {
 const putFile = (id, blob) => fileTransaction('readwrite', store => store.put(blob, id));
 const getFile = id => fileTransaction('readonly', store => store.get(id));
 const removeFile = id => fileTransaction('readwrite', store => store.delete(id));
+const removeFileIfUnused = id => state.sections.some(section => section.records.some(record =>
+  (record.attachments || []).some(item => item.id === id) || record.tips.some(tip => (tip.blocks || []).some(block => block.fileId === id))))
+  ? Promise.resolve() : removeFile(id);
 
 function readState() {
   return new Promise((resolve, reject) => {
@@ -309,11 +315,229 @@ function renderTips() {
       const tip = tips.find(item => item.id === button.dataset.tip);
       if (!tip) return;
       const wasRevealed = revealed?.kind === 'tip' && revealed.id === tip.id;
-      const preview = (tip.blocks || []).find(block => block.type === 'text' && block.text?.trim())?.text || tip.body || ((tip.blocks || []).length ? '图片 / 手写' : '暂无内容');
+      const preview = (tip.blocks || []).find(block => block.type === 'text' && block.text?.trim())?.text || tip.body || (tip.blocks || []).find(block => block.type === 'question')?.fileName || ((tip.blocks || []).length ? '图片 / 手写' : '暂无内容');
       revealItem('tip', tip.id, button, tip.title, preview, () => openTip(tip.id));
       $('tips').querySelectorAll('[data-tip]').forEach(tile => tile.setAttribute('aria-expanded', String(!wasRevealed && tile === button)));
     });
   });
+}
+
+async function chooseQuestionFile(event) {
+  const file = event.target.files?.[0];
+  event.target.value = '';
+  if (!file) return;
+  if (file.size > 80 * 1024 * 1024) return message('PDF 超过 80 MB，请先拆成较小文件');
+  const record = currentRecord();
+  if (!record) return;
+  closeQuestionImport();
+  questionImport = { file, recordId: record.id, pages: [], selectedPage: 0, adding: false };
+  $('question-modal').hidden = false;
+  $('question-review').hidden = true;
+  $('question-range').hidden = true;
+  $('confirm-questions').hidden = true;
+  $('question-status').textContent = '读取 PDF…';
+  try {
+    const opened = await BubbleQuestionBank.openPdf(file);
+    if (questionImport?.file !== file) return opened.task.destroy();
+    questionImport.task = opened.task;
+    questionImport.document = opened.document;
+    $('question-from').value = 1;
+    $('question-to').value = opened.document.numPages;
+    for (const id of ['question-from', 'question-to']) $(id).max = opened.document.numPages;
+    $('question-range').hidden = false;
+    $('question-status').textContent = `${opened.document.numPages} 页 · 选择范围后识别`;
+    if (opened.document.numPages <= 8) analyzeQuestionPages();
+  } catch (error) { $('question-status').textContent = error.message || 'PDF 无法打开'; }
+}
+
+function closeQuestionImport() {
+  questionImportRun++;
+  const previous = questionImport;
+  questionImport = null;
+  $('question-modal').hidden = true;
+  if (previous?.task) previous.task.destroy().catch(() => {});
+  BubbleQuestionBank.stopOcr().catch(() => {});
+}
+
+async function analyzeQuestionPages() {
+  const draft = questionImport;
+  if (!draft?.document) return;
+  const start = Math.max(1, Math.min(draft.document.numPages, Number($('question-from').value) || 1));
+  const end = Math.max(start, Math.min(draft.document.numPages, Number($('question-to').value) || start));
+  const run = ++questionImportRun;
+  draft.pages = [];
+  $('question-review').hidden = true;
+  $('confirm-questions').hidden = true;
+  $('analyze-questions').disabled = true;
+  try {
+    for (let number = start; number <= end; number++) {
+      if (run !== questionImportRun || draft !== questionImport) return;
+      $('question-status').textContent = `识别 ${number} / ${end} 页…`;
+      const page = await draft.document.getPage(number);
+      const detected = await BubbleQuestionBank.recognizePage(page, progress => {
+        if (run === questionImportRun) $('question-status').textContent = `识别第 ${number} 页 ${Math.round(progress * 100)}%`;
+      });
+      draft.pages.push({ number, markers: detected.markers, gaps: detected.gaps, end: .955, method: detected.method });
+    }
+    BubbleQuestionBank.repairSequence(draft.pages);
+    draft.selectedPage = 0;
+    $('question-review').hidden = false;
+    $('confirm-questions').hidden = false;
+    $('question-status').textContent = '拖动横线修正范围，确认后生成小 tip';
+    await renderQuestionReview();
+  } catch (error) {
+    if (run === questionImportRun) $('question-status').textContent = error.message || '识别失败，请重试';
+  } finally {
+    $('analyze-questions').disabled = false;
+    BubbleQuestionBank.stopOcr().catch(() => {});
+  }
+}
+
+async function renderQuestionReview() {
+  const draft = questionImport;
+  if (!draft?.pages.length) return;
+  const selected = draft.pages[draft.selectedPage];
+  $('question-count').textContent = `${draft.pages.reduce((sum, page) => sum + page.markers.filter(marker => !marker.mergePrevious).length, 0)} 题`;
+  $('question-page-label').textContent = `第 ${selected.number} 页`;
+  $('question-prev-page').disabled = draft.selectedPage === 0;
+  $('question-next-page').disabled = draft.selectedPage === draft.pages.length - 1;
+  let continuation = $('question-continue');
+  if (!continuation) {
+    continuation = document.createElement('button');
+    continuation.id = 'question-continue';
+    continuation.className = 'secondary question-continue';
+    continuation.textContent = '页首接上题';
+    $('question-preview').before(continuation);
+  }
+  continuation.hidden = draft.selectedPage === 0;
+  continuation.classList.toggle('selected', !!selected.continueFromPrevious);
+  continuation.setAttribute('aria-pressed', String(!!selected.continueFromPrevious));
+  continuation.onclick = () => { selected.continueFromPrevious = !selected.continueFromPrevious; renderQuestionReview(); };
+  const run = questionImportRun;
+  const page = await draft.document.getPage(selected.number);
+  if (draft !== questionImport || run !== questionImportRun) return;
+  const unit = page.getViewport({ scale: 1 });
+  const viewport = page.getViewport({ scale: Math.min(1250 / unit.height, 950 / unit.width) });
+  const canvas = $('question-page-canvas');
+  canvas.width = Math.ceil(viewport.width); canvas.height = Math.ceil(viewport.height);
+  await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
+  if (draft !== questionImport || selected !== draft.pages[draft.selectedPage]) return;
+  const lines = $('question-lines');
+  lines.innerHTML = selected.markers.map((marker, index) => `<button class="question-line ${marker.mergePrevious ? 'merged-line' : ''}" data-line="${index}" style="top:${marker.y * 100}%" aria-label="第 ${marker.number} 题起点"><span>${marker.number}</span></button>`).join('')
+    + `<button class="question-line end-line" data-end style="top:${selected.end * 100}%" aria-label="本页题目结束位置"><span>结束</span></button>`;
+  lines.querySelectorAll('.question-line').forEach(line => {
+    line.onpointerdown = event => {
+      if (draft.adding) return;
+      event.preventDefault();
+      line.setPointerCapture(event.pointerId);
+      const move = point => {
+        const bounds = lines.getBoundingClientRect();
+        const y = Math.max(.02, Math.min(.99, (point.clientY - bounds.top) / bounds.height));
+        if (line.hasAttribute('data-end')) selected.end = Math.max((selected.markers.at(-1)?.y || 0) + .02, y);
+        else {
+          const index = Number(line.dataset.line);
+          selected.markers[index].y = Math.max((selected.markers[index - 1]?.y || 0) + .015, Math.min((selected.markers[index + 1]?.y || selected.end) - .015, y));
+        }
+        line.style.top = `${(line.hasAttribute('data-end') ? selected.end : selected.markers[Number(line.dataset.line)].y) * 100}%`;
+      };
+      line.onpointermove = point => { if (line.hasPointerCapture(point.pointerId)) move(point); };
+      line.onpointerup = point => { move(point); line.onpointermove = null; line.onpointerup = null; };
+    };
+  });
+  $('question-list').innerHTML = selected.markers.map((marker, index) => `<div class="question-row"><span>${index + 1}</span><label>题号 <input data-number="${index}" type="number" min="1" max="9999" value="${marker.number}" aria-label="修改题号"></label>${index || draft.selectedPage ? `<button data-remove-line="${index}" class="secondary" aria-label="合并这道题">${index ? '合并' : marker.mergePrevious ? '取消合并' : '接上题'}</button>` : ''}</div>`).join('') || '<p>未找到题号，可点“＋ 分割线”补加。</p>';
+  $('question-list').querySelectorAll('[data-number]').forEach(input => input.onchange = () => {
+    selected.markers[Number(input.dataset.number)].number = Math.max(1, Number(input.value) || 1);
+    renderQuestionReview();
+  });
+  $('question-list').querySelectorAll('[data-remove-line]').forEach(button => button.onclick = () => {
+    const index = Number(button.dataset.removeLine);
+    if (index === 0) selected.markers[0].mergePrevious = !selected.markers[0].mergePrevious;
+    else selected.markers.splice(index, 1);
+    renderQuestionReview();
+  });
+}
+
+function addQuestionLine(event) {
+  const draft = questionImport;
+  if (!draft?.adding) return;
+  const selected = draft.pages[draft.selectedPage];
+  const bounds = $('question-lines').getBoundingClientRect();
+  const y = (event.clientY - bounds.top) / bounds.height;
+  if (y < .02 || y >= selected.end - .015) return;
+  const index = selected.markers.findIndex(marker => marker.y > y);
+  const next = index < 0 ? selected.markers.length : index;
+  selected.markers.splice(next, 0, { number: (selected.markers[next - 1]?.number || 0) + 1, y });
+  draft.adding = false;
+  $('question-add-line').classList.remove('selected');
+  renderQuestionReview();
+}
+
+async function confirmQuestionImport() {
+  const draft = questionImport;
+  const record = currentRecord();
+  if (!draft || !record || record.id !== draft.recordId) return;
+  const questions = [];
+  for (const page of draft.pages) {
+    if (page.continueFromPrevious && questions.length) {
+      const topEnd = page.markers[0]?.y || page.end;
+      if (topEnd > .055) questions.at(-1).parts.push({ page: page.number, crop: { x0: .06, x1: .95, y0: .04, y1: topEnd } });
+    }
+    for (let index = 0; index < page.markers.length; index++) {
+      const marker = page.markers[index];
+      const part = { page: page.number, crop: { x0: .06, x1: .95, y0: marker.y, y1: page.markers[index + 1]?.y || page.end } };
+      if (part.crop.y1 - part.crop.y0 <= .015) continue;
+      if (marker.mergePrevious && questions.length) questions.at(-1).parts.push(part);
+      else questions.push({ number: marker.number, parts: [part] });
+    }
+  }
+  if (!questions.length) return message('请至少保留一道题');
+  const button = $('confirm-questions');
+  button.disabled = true;
+  button.textContent = '保存中…';
+  let sourceId;
+  try {
+    const hashBytes = await crypto.subtle.digest('SHA-256', await draft.file.arrayBuffer());
+    const hash = Array.from(new Uint8Array(hashBytes), byte => byte.toString(16).padStart(2, '0')).join('');
+    if (record.tips.some(tip => tip.sourceHash === hash) && !confirm('这份题库已导入过，继续导入会产生重复题目。继续吗？')) return;
+    sourceId = uid();
+    await putFile(sourceId, draft.file);
+    const batchId = uid();
+    const tips = questions.map(question => ({
+      id: uid(), title: `第 ${question.number} 题`, body: '', level: 'none', createdAt: Date.now(), sourceHash: hash, importBatch: batchId,
+      blocks: question.parts.map(part => ({ id: uid(), type: 'question', fileId: sourceId, fileName: draft.file.name.slice(0, 255), page: part.page, crop: part.crop, annotations: {} }))
+    }));
+    record.tips.push(...tips);
+    record.updatedAt = Date.now();
+    while (saving) await new Promise(resolve => setTimeout(resolve, 30));
+    await writeState(structuredClone(state));
+    renderTips();
+    closeQuestionImport();
+    finalizePendingDeletion();
+    if (questionUndo) clearTimeout(questionUndo.timer);
+    $('undo-label').textContent = `已导入 ${tips.length} 题`;
+    $('undo-toast').hidden = false;
+    questionUndo = { record, ids: new Set(tips.map(tip => tip.id)), sourceId, timer: setTimeout(() => { questionUndo = null; $('undo-toast').hidden = true; }, 10000) };
+    message(`已生成 ${tips.length} 个小 tip`);
+  } catch (error) {
+    if (sourceId) {
+      record.tips = record.tips.filter(tip => tip.blocks?.[0]?.fileId !== sourceId);
+      await removeFile(sourceId).catch(() => {});
+    }
+    message(error.message || '导入失败，原有内容未改变');
+  } finally { button.disabled = false; button.textContent = '生成 tip'; }
+}
+
+async function undoQuestionImport() {
+  const batch = questionUndo;
+  if (!batch) return;
+  clearTimeout(batch.timer);
+  questionUndo = null;
+  batch.record.tips = batch.record.tips.filter(tip => !batch.ids.has(tip.id));
+  await writeState(structuredClone(state));
+  await removeFileIfUnused(batch.sourceId);
+  $('undo-toast').hidden = true;
+  renderTips();
+  message('已撤销导入');
 }
 
 function dragCollection(kind) {
@@ -399,7 +623,7 @@ function tileFileIds(kind, item) {
 function finalizePendingDeletion() {
   if (!pendingDeletion) return;
   clearTimeout(pendingDeletion.timer);
-  Promise.allSettled(pendingDeletion.fileIds.map(removeFile));
+  Promise.allSettled(pendingDeletion.fileIds.map(removeFileIfUnused));
   pendingDeletion = null;
   $('undo-toast').hidden = true;
 }
@@ -409,6 +633,7 @@ function deleteDraggedTile(kind, id) {
   const index = items?.findIndex(item => item.id === id) ?? -1;
   if (index < 0) return;
   finalizePendingDeletion();
+  if (questionUndo) { clearTimeout(questionUndo.timer); questionUndo = null; }
   const [item] = items.splice(index, 1);
   save();
   render();
@@ -678,6 +903,7 @@ function bindInkToolbar(element, block, canvas) {
 
 async function renderTipDocument() {
   if (!tipDraft) return;
+  document.documentElement.classList.remove('pdf-editing');
   const renderId = ++tipRenderId;
   pdfTasks.forEach(task => task.destroy().catch(() => {}));
   pdfTasks = [];
@@ -685,7 +911,7 @@ async function renderTipDocument() {
   const container = $('tip-document');
   container.innerHTML = tipDraft.blocks.map((block, index) => `<div class="tip-block" data-block="${block.id}">
     <div class="tip-block-tools"><span>${index + 1}</span><button data-move="up" aria-label="上移内容" ${index === 0 ? 'disabled' : ''}>↑</button><button data-move="down" aria-label="下移内容" ${index === tipDraft.blocks.length - 1 ? 'disabled' : ''}>↓</button><button data-remove-block aria-label="删除这块内容">×</button></div>
-    ${block.type === 'text' ? `<textarea class="tip-text" rows="2" aria-label="第 ${index + 1} 段文字" placeholder="写在这里…">${escapeHtml(block.text || '')}</textarea>` : block.type === 'ink' ? `<div class="ink-sheet">${inkToolbarHtml()}<canvas class="tip-ink" width="1000" height="625" aria-label="直接在小 tip 中手写"></canvas></div>` : block.type === 'pdf' ? `<div class="pdf-sheet">${inkToolbarHtml()}<div class="pdf-stage"><canvas class="pdf-page" aria-label="PDF 页面"></canvas><canvas class="tip-ink pdf-ink" data-overlay="true" aria-label="在 PDF 上手写"></canvas></div><div class="pdf-pagebar"><button data-pdf-prev aria-label="上一页">←</button><span data-pdf-status>加载 PDF…</span><button data-pdf-next aria-label="下一页">→</button><button data-pdf-export aria-label="导出批注 PDF" title="导出批注 PDF">↓ PDF</button></div></div>` : block.type === 'file' ? `<a class="tip-file-block" aria-label="打开文件：${escapeHtml(block.fileName || '文件')}" target="_blank" rel="noopener">▤ <span>${escapeHtml(block.fileName || '文件')}</span></a>` : `<button class="tip-image-block" aria-label="查看图片"><span>加载中…</span></button>`}
+    ${block.type === 'text' ? `<textarea class="tip-text" rows="2" aria-label="第 ${index + 1} 段文字" placeholder="写在这里…">${escapeHtml(block.text || '')}</textarea>` : block.type === 'ink' ? `<div class="ink-sheet">${inkToolbarHtml()}<canvas class="tip-ink" width="1000" height="625" aria-label="直接在小 tip 中手写"></canvas></div>` : ['pdf', 'question'].includes(block.type) ? `<div class="pdf-sheet">${inkToolbarHtml()}<div class="pdf-viewport"><div class="pdf-stage"><canvas class="pdf-page" aria-label="PDF 页面"></canvas><canvas class="tip-ink pdf-ink" data-overlay="true" aria-label="在 PDF 上手写"></canvas></div></div><div class="pdf-pagebar"><button data-pdf-prev aria-label="上一页">←</button><span data-pdf-status>加载 PDF…</span><button data-pdf-next aria-label="下一页">→</button><span class="pdf-zoom-tools"><button data-pdf-zoom-out aria-label="缩小画布">−</button><output data-pdf-zoom>100%</output><button data-pdf-zoom-in aria-label="放大画布">＋</button></span><button data-pdf-expand aria-label="展开大画布" title="展开大画布">⛶</button><button data-pdf-export aria-label="导出批注 PDF" title="导出批注 PDF">↓ PDF</button></div></div>` : block.type === 'file' ? `<a class="tip-file-block" aria-label="打开文件：${escapeHtml(block.fileName || '文件')}" target="_blank" rel="noopener">▤ <span>${escapeHtml(block.fileName || '文件')}</span></a>` : `<button class="tip-image-block" aria-label="查看图片"><span>加载中…</span></button>`}
   </div>`).join('');
   container.querySelectorAll('[data-block]').forEach(element => {
     const block = tipDraft.blocks.find(item => item.id === element.dataset.block);
@@ -726,7 +952,7 @@ async function renderPdfBlock(block, element, renderId) {
   const status = element.querySelector('[data-pdf-status]');
   if (!window.pdfjsLib) { status.textContent = 'PDF 阅读器不可用'; return; }
   try {
-    const blob = await getFile(block.fileId);
+    const blob = block.type === 'question' ? await BubbleQuestionBank.cropPdf(block, getFile) : await getFile(block.fileId);
     if (!blob) throw new Error('PDF 文件缺失');
     if (renderId !== tipRenderId || !element.isConnected) return;
     window.pdfjsLib.GlobalWorkerOptions.workerSrc = './vendor/pdfjs.worker.min.js';
@@ -738,6 +964,34 @@ async function renderPdfBlock(block, element, renderId) {
     const inkCanvas = element.querySelector('.pdf-ink');
     const prev = element.querySelector('[data-pdf-prev]');
     const next = element.querySelector('[data-pdf-next]');
+    const sheet = element.querySelector('.pdf-sheet');
+    const scrollArea = element.querySelector('.pdf-viewport');
+    const stage = element.querySelector('.pdf-stage');
+    const expandButton = element.querySelector('[data-pdf-expand]');
+    const zoomValue = element.querySelector('[data-pdf-zoom]');
+    let zoom = window.innerWidth < 700 ? 2 : 1.25;
+    const updateZoom = () => {
+      if (!sheet.classList.contains('is-expanded')) { stage.style.width = '100%'; return; }
+      const oldWidth = stage.getBoundingClientRect().width || scrollArea.clientWidth;
+      const center = (scrollArea.scrollLeft + scrollArea.clientWidth / 2) / oldWidth;
+      stage.style.width = `${Math.round(scrollArea.clientWidth * zoom)}px`;
+      scrollArea.scrollLeft = Math.max(0, center * stage.getBoundingClientRect().width - scrollArea.clientWidth / 2);
+      zoomValue.textContent = `${Math.round(zoom * 100)}%`;
+    };
+    expandButton.onclick = () => {
+      const expanded = sheet.classList.toggle('is-expanded');
+      document.documentElement.classList.toggle('pdf-editing', expanded);
+      expandButton.textContent = expanded ? '×' : '⛶';
+      expandButton.setAttribute('aria-label', expanded ? '收起画布' : '展开大画布');
+      if (expanded) {
+        stage.style.width = `${Math.round(scrollArea.clientWidth * zoom)}px`;
+        zoomValue.textContent = `${Math.round(zoom * 100)}%`;
+        scrollArea.scrollLeft = Math.max(0, (stage.getBoundingClientRect().width - scrollArea.clientWidth) / 2);
+        scrollArea.scrollTop = 0;
+      } else { stage.style.width = '100%'; scrollArea.scrollLeft = scrollArea.scrollTop = 0; }
+    };
+    element.querySelector('[data-pdf-zoom-out]').onclick = () => { zoom = Math.max(1, zoom - .25); updateZoom(); };
+    element.querySelector('[data-pdf-zoom-in]').onclick = () => { zoom = Math.min(3, zoom + .25); updateZoom(); };
     let pageNumber = Math.max(1, Math.min(documentPdf.numPages, Number(block.viewPage) || 1));
     let busy = false;
     const showPage = async () => {
@@ -758,6 +1012,7 @@ async function renderPdfBlock(block, element, renderId) {
         setupTipInk(pageInk, inkCanvas);
         bindInkToolbar(element, pageInk, inkCanvas);
         status.textContent = `${pageNumber} / ${documentPdf.numPages}`;
+        if (documentPdf.numPages === 1 && block.type === 'question') { prev.hidden = next.hidden = status.hidden = true; }
       } catch { status.textContent = 'PDF 页面无法显示'; }
       finally { busy = false; prev.disabled = pageNumber === 1; next.disabled = pageNumber === documentPdf.numPages; }
     };
@@ -922,9 +1177,13 @@ async function exportTipPdf() {
   if (!tipDraft) return;
   const title = $('tip-title').value.trim() || '小 tip';
   try {
-    const pdfBlocks = tipDraft.blocks.filter(block => block.type === 'pdf');
+    const pdfBlocks = tipDraft.blocks.filter(block => ['pdf', 'question'].includes(block.type));
     if (pdfBlocks.length) {
-      if (pdfBlocks.length !== 1 || tipDraft.blocks.some(block => block.type !== 'pdf' && (block.type !== 'ink' || block.strokes?.length))) {
+      if (pdfBlocks.length !== 1 || tipDraft.blocks.some(block => !['pdf', 'question'].includes(block.type) && (block.type !== 'ink' || block.strokes?.length))) {
+        if (pdfBlocks.every(block => block.type === 'question')) {
+          await window.BubblePdf.exportPdf(title, [{ title: '', blocks: tipDraft.blocks }], getFile);
+          return message('PDF 已导出');
+        }
         return message('请在 PDF 页面下方单独导出批注 PDF');
       }
       await window.BubblePdfAnnotation.exportAnnotated(pdfBlocks[0], getFile);
@@ -963,6 +1222,7 @@ function renderTipLevels() {
 }
 
 function closeTip() {
+  document.documentElement.classList.remove('pdf-editing');
   $('tip-modal').hidden = true;
   $('tip-color-popover').hidden = true;
   ++tipRenderId;
@@ -985,7 +1245,7 @@ function saveTip() {
   if (tip) Object.assign(tip, { title, body: '', blocks, level: tipLevel });
   else record.tips.push({ id: uid(), title, body: '', blocks, level: tipLevel, createdAt: Date.now() });
   const keptFiles = blocks.filter(block => block.fileId).map(block => block.fileId);
-  Promise.allSettled([...oldFiles, ...tipDraftNewFiles].filter(id => !keptFiles.includes(id)).map(removeFile));
+  Promise.allSettled([...oldFiles, ...tipDraftNewFiles].filter(id => !keptFiles.includes(id)).map(removeFileIfUnused));
   tipDraftNewFiles = [];
   record.updatedAt = Date.now();
   save();
@@ -1001,7 +1261,7 @@ function deleteTip() {
   save();
   renderTips();
   closeTip();
-  Promise.allSettled(fileIds.map(removeFile));
+  Promise.allSettled(fileIds.map(removeFileIfUnused));
 }
 
 function openSectionDialog(editing = false) {
@@ -1061,7 +1321,7 @@ function deleteSection() {
   renderSections();
   $('section-modal').hidden = true;
   show('home');
-  Promise.allSettled(fileIds.map(removeFile));
+  Promise.allSettled(fileIds.map(removeFileIfUnused));
 }
 
 function deleteRecord() {
@@ -1074,7 +1334,7 @@ function deleteRecord() {
   renderRecords();
   renderSections();
   show('zone');
-  Promise.allSettled(fileIds.map(removeFile));
+  Promise.allSettled(fileIds.map(removeFileIfUnused));
 }
 
 function bytesToBase64(bytes) {
@@ -1104,7 +1364,7 @@ async function exportBackup() {
       if (!blob) throw new Error('附件数据缺失，无法完整备份');
       files.push({ id, type: blob.type, data: bytesToBase64(new Uint8Array(await blob.arrayBuffer())) });
     }
-    const data = JSON.stringify({ format: 'bubble-notes-backup', version: 5, exportedAt: new Date().toISOString(), sections: state.sections, files });
+    const data = JSON.stringify({ format: 'bubble-notes-backup', version: 6, exportedAt: new Date().toISOString(), sections: state.sections, files });
     const blob = new Blob([data], { type: 'application/json' });
     const name = `泡泡笔记备份-${new Date().toISOString().slice(0, 10)}.json`;
     if (window.BubbleNative) await saveBlobNative(blob, name);
@@ -1128,12 +1388,23 @@ async function exportBackup() {
 }
 
 function normalizeBackup(data) {
-  if (!data || data.format !== 'bubble-notes-backup' || ![1, 2, 3, 4, 5].includes(data.version) || !Array.isArray(data.sections) || data.sections.length > 10000) {
+  if (!data || data.format !== 'bubble-notes-backup' || ![1, 2, 3, 4, 5, 6].includes(data.version) || !Array.isArray(data.sections) || data.sections.length > 10000) {
     throw new Error('备份格式不正确');
   }
   if (data.version >= 2 && !Array.isArray(data.files)) throw new Error('附件数据不完整');
   const filesById = new Map((data.files || []).map(file => [file.id, file]));
   const importedFiles = [];
+  const newFileIds = new Map();
+  const restoreFile = oldId => {
+    if (newFileIds.has(oldId)) return newFileIds.get(oldId);
+    const file = filesById.get(oldId);
+    if (!file || typeof file.data !== 'string' || typeof file.type !== 'string') throw new Error('题库或附件数据不完整');
+    const id = uid();
+    importedFiles.push({ id, blob: base64ToBlob(file.data, file.type) });
+    newFileIds.set(oldId, id);
+    attachmentCount++;
+    return id;
+  };
   let recordCount = 0;
   let tipCount = 0;
   let attachmentCount = 0;
@@ -1163,31 +1434,24 @@ function normalizeBackup(data) {
           if (block?.type === 'ink' && Array.isArray(block.strokes)) {
             return { id: uid(), type: 'ink', strokes: normalizeStrokes(block.strokes) };
           }
-          if (!['image', 'drawing', 'file', 'pdf'].includes(block?.type) || typeof block.fileId !== 'string') throw new Error('tip 内容不完整');
-          const file = filesById.get(block.fileId);
-          if (!file || typeof file.data !== 'string' || typeof file.type !== 'string') throw new Error('tip 图片数据不完整');
-          const blob = base64ToBlob(file.data, file.type);
-          const id = uid();
-          attachmentCount++;
-          importedFiles.push({ id, blob });
+          if (!['image', 'drawing', 'file', 'pdf', 'question'].includes(block?.type) || typeof block.fileId !== 'string') throw new Error('tip 内容不完整');
+          const id = restoreFile(block.fileId);
           const annotations = {};
-          if (block.type === 'pdf' && block.annotations && typeof block.annotations === 'object') {
+          if (['pdf', 'question'].includes(block.type) && block.annotations && typeof block.annotations === 'object') {
             for (const page of Object.keys(block.annotations).slice(0, 10000)) {
               if (/^[1-9]\d*$/.test(page)) annotations[page] = { strokes: normalizeStrokes(block.annotations[page]?.strokes) };
             }
           }
-          return { id: uid(), type: block.type, fileId: id, fileName: ['file', 'pdf'].includes(block.type) ? String(block.fileName || '文件').slice(0, 255) : undefined, strokes: Array.isArray(block.strokes) ? block.strokes : undefined, ...(block.type === 'pdf' ? { annotations } : {}) };
+          const crop = block.type === 'question' ? block.crop : null;
+          if (block.type === 'question' && (!Number.isInteger(block.page) || block.page < 1 || !crop || ![crop.x0, crop.x1, crop.y0, crop.y1].every(value => Number.isFinite(value) && value >= 0 && value <= 1) || crop.x1 <= crop.x0 || crop.y1 <= crop.y0)) throw new Error('题目范围不完整');
+          return { id: uid(), type: block.type, fileId: id, fileName: ['file', 'pdf', 'question'].includes(block.type) ? String(block.fileName || '文件').slice(0, 255) : undefined, strokes: Array.isArray(block.strokes) ? block.strokes : undefined, ...(['pdf', 'question'].includes(block.type) ? { annotations } : {}), ...(block.type === 'question' ? { page: block.page, crop } : {}) };
         });
-        return { id: uid(), title: tip.title.slice(0, 80), body: tip.body, blocks, level: validLevel(tip.level), createdAt: Number(tip.createdAt) || Date.now() };
+        return { id: uid(), title: tip.title.slice(0, 80), body: tip.body, blocks, level: validLevel(tip.level), createdAt: Number(tip.createdAt) || Date.now(), sourceHash: typeof tip.sourceHash === 'string' ? tip.sourceHash : undefined, importBatch: typeof tip.importBatch === 'string' ? tip.importBatch : undefined };
       });
       const attachments = (record.attachments || []).map(attachment => {
         if (!attachment || typeof attachment.id !== 'string' || typeof attachment.name !== 'string') throw new Error('附件信息不完整');
-        const file = filesById.get(attachment.id);
-        if (!file || typeof file.data !== 'string' || typeof file.type !== 'string') throw new Error('附件数据不完整');
-        const blob = base64ToBlob(file.data, file.type);
-        const id = uid();
-        attachmentCount++;
-        importedFiles.push({ id, blob });
+        const id = restoreFile(attachment.id);
+        const blob = importedFiles.find(file => file.id === id).blob;
         return { id, name: attachment.name.slice(0, 255), type: blob.type, size: blob.size, kind: ['image', 'drawing', 'file'].includes(attachment.kind) ? attachment.kind : 'file', strokes: Array.isArray(attachment.strokes) ? attachment.strokes : undefined };
       });
       return { id: uid(), title: record.title.slice(0, 80), body: record.body, level: validLevel(record.level), tips, attachments, updatedAt: Number(record.updatedAt) || Date.now() };
@@ -1319,7 +1583,7 @@ function bindEvents() {
     event.stopImmediatePropagation();
   }, true);
   window.addEventListener('blur', clearTileDrag);
-  $('undo-delete').onclick = undoDraggedDelete;
+  $('undo-delete').onclick = () => questionUndo ? undoQuestionImport() : undoDraggedDelete();
   const pressedButtons = new Map();
   document.addEventListener('pointerdown', event => {
     const button = event.target.closest('button:not(:disabled)');
@@ -1393,6 +1657,16 @@ function bindEvents() {
   $('drawing-canvas').addEventListener('pointerup', handleDrawingEnd);
   $('drawing-canvas').addEventListener('pointercancel', handleDrawingEnd);
   $('add-tip').onclick = () => openTip();
+  $('import-questions').onclick = () => $('question-file').click();
+  $('question-file').onchange = chooseQuestionFile;
+  $('close-questions').onclick = closeQuestionImport;
+  $('cancel-questions').onclick = closeQuestionImport;
+  $('analyze-questions').onclick = analyzeQuestionPages;
+  $('confirm-questions').onclick = confirmQuestionImport;
+  $('question-prev-page').onclick = () => { if (questionImport && questionImport.selectedPage > 0) { questionImport.selectedPage--; renderQuestionReview(); } };
+  $('question-next-page').onclick = () => { if (questionImport && questionImport.selectedPage < questionImport.pages.length - 1) { questionImport.selectedPage++; renderQuestionReview(); } };
+  $('question-add-line').onclick = () => { if (!questionImport) return; questionImport.adding = !questionImport.adding; $('question-add-line').classList.toggle('selected', questionImport.adding); };
+  $('question-preview').onclick = addQuestionLine;
   $('export-record-pdf').onclick = exportRecordPdf;
   $('export-tip-pdf').onclick = exportTipPdf;
   $('tip-add-text').onclick = () => { tipDraft.blocks.push({ id: uid(), type: 'text', text: '' }); renderTipDocument(); $('tip-document').querySelector('.tip-block:last-child textarea')?.focus(); };
@@ -1410,6 +1684,7 @@ function bindEvents() {
     modal.addEventListener('click', event => {
       if (event.target !== modal) return;
       if (modal.id === 'tip-modal') closeTip();
+      else if (modal.id === 'question-modal') closeQuestionImport();
       else if (modal.id === 'drawing-modal') cancelDrawing();
       else modal.hidden = true;
     });
@@ -1418,7 +1693,9 @@ function bindEvents() {
     if (event.key === 'Escape') {
       if (dragState?.active) return clearTileDrag();
       if (!$('drawing-modal').hidden) cancelDrawing();
+      else if (document.querySelector('.pdf-sheet.is-expanded')) document.querySelector('.pdf-sheet.is-expanded [data-pdf-expand]').click();
       else if (!$('tip-modal').hidden) closeTip();
+      else if (!$('question-modal').hidden) closeQuestionImport();
       else document.querySelectorAll('.modal').forEach(modal => { modal.hidden = true; });
     }
   });
