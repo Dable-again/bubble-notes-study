@@ -1,0 +1,8 @@
+.gradle/
+build/
+app/build/
+app/src/main/assets/site/
+local.properties
+*.apk
+*.jks
+signing.properties

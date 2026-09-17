@@ -1,0 +1,63 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const vm = require('node:vm');
+
+const source = fs.readFileSync('dist/app.js', 'utf8').replace(/\nstart\(\);\s*$/, '');
+const context = vm.createContext({
+  crypto: require('node:crypto').webcrypto,
+  Blob,
+  atob,
+  Date,
+  document: {},
+  window: {},
+});
+vm.runInContext(source, context);
+
+const base = version => ({
+  format: 'bubble-notes-backup', version,
+  sections: [{ name: '数学', color: 'blue', shape: 'square', records: [{
+    title: '错题集', body: '记录', level: 'red', attachments: [],
+    tips: [{ title: '公式', body: '旧正文', level: 'yellow' }]
+  }] }]
+});
+const legacy = context.normalizeBackup(base(1));
+assert.equal(legacy.sections[0].records[0].tips[0].body, '旧正文');
+assert.equal(legacy.files.length, 0);
+
+const v2 = base(2);
+v2.sections[0].records[0].attachments.push({ id: 'old-file', name: '图.png', kind: 'image' });
+v2.files = [{ id: 'old-file', type: 'image/png', data: 'AA==' }];
+const oldImage = context.normalizeBackup(v2);
+assert.equal(oldImage.files.length, 1);
+assert.notEqual(oldImage.sections[0].records[0].attachments[0].id, 'old-file');
+
+const v3 = base(3);
+v3.sections[0].records[0].tips[0].blocks = [
+  { type: 'text', text: '新正文' },
+  { type: 'drawing', fileId: 'stroke', strokes: [{ points: [{ x: .5, y: .5, p: .7 }] }] },
+  { type: 'image', fileId: 'photo' }
+];
+v3.files = [
+  { id: 'stroke', type: 'image/png', data: 'AA==' },
+  { id: 'photo', type: 'image/png', data: 'AQ==' }
+];
+const imported = context.normalizeBackup(v3);
+const blocks = imported.sections[0].records[0].tips[0].blocks;
+assert.equal(blocks.length, 3);
+assert.equal(imported.files.length, 2);
+assert.ok(blocks[1].fileId !== 'stroke' && blocks[2].fileId !== 'photo');
+assert.equal(blocks[1].strokes[0].points[0].p, .7);
+const v4 = base(4);
+v4.files = [];
+v4.sections[0].records[0].tips[0].blocks = [{ type: 'ink', strokes: [{ color: 'red', points: [{ x: .25, y: .8, p: .6 }] }] }];
+const ink = context.normalizeBackup(v4).sections[0].records[0].tips[0].blocks[0];
+assert.equal(ink.type, 'ink');
+assert.equal(ink.strokes[0].color, 'red');
+assert.equal(ink.strokes[0].points[0].p, .6);
+const withFile = base(4);
+withFile.files = [{ id: 'book', type: 'application/pdf', data: 'JVBERg==' }];
+withFile.sections[0].records[0].tips[0].blocks = [{ type: 'file', fileId: 'book', fileName: '习题.pdf' }];
+const restoredFile = context.normalizeBackup(withFile);
+assert.equal(restoredFile.sections[0].records[0].tips[0].blocks[0].fileName, '习题.pdf');
+assert.equal(restoredFile.files[0].blob.type, 'application/pdf');
+console.log('v1–v4 backups accepted; tip images, handwriting, and files preserved.');
